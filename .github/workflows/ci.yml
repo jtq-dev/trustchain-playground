@@ -1,0 +1,107 @@
+name: ci
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write   # needed for cosign keyless
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}/trustchain-playground
+
+jobs:
+  test-scan-build-sign:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---- Secrets scanning (gitleaks) ----
+      - name: Gitleaks scan
+        uses: gitleaks/gitleaks-action@v2
+        with:
+          args: detect --source . --verbose
+
+      # ---- SAST (Semgrep) ----
+      - name: Semgrep scan (fails on findings)
+        run: |
+          python -m pip install --upgrade pip
+          pip install semgrep
+          # semgrep scan can fail on findings with --error :contentReference[oaicite:16]{index=16}
+          semgrep scan --config p/ci --error
+
+      # ---- Trivy filesystem scan (IaC+secrets+misconfig) ----
+      - name: Trivy fs scan (fail HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          scanners: vuln,secret,misconfig
+
+      # ---- Build & push image to GHCR ----
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=${{ github.repositoryUrl }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      # ---- Trivy image scan (fail HIGH/CRITICAL) ----
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.IMAGE }}:sha-${{ github.sha }}
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+
+      # ---- Install cosign ----
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      # ---- Sign image (keyless) ----
+      - name: Cosign sign (keyless)
+        run: |
+          # keyless signing in CI is standard in Sigstore docs :contentReference[oaicite:17]{index=17}
+          cosign sign --yes ${{ env.IMAGE }}:sha-${{ github.sha }}
+
+      # ---- Attach an in-toto attestation ----
+      - name: Cosign attest (in-toto)
+        run: |
+          cat > predicate.json << 'JSON'
+          {
+            "buildType": "trustchain-playground",
+            "repo": "${{ github.repository }}",
+            "commit": "${{ github.sha }}",
+            "notes": "Demo attestation: scanned, built, signed in CI"
+          }
+          JSON
+          # Kyverno/cosign support attestations (in-toto) :contentReference[oaicite:18]{index=18}
+          cosign attest --yes --predicate predicate.json --type "trustchain.dev/ci-attestation" \
+            ${{ env.IMAGE }}:sha-${{ github.sha }}
+
+      # ---- Verify signature (identity/issuer) ----
+      - name: Cosign verify (lock issuer)
+        run: |
+          # cosign verify uses identity/issuer in keyless mode :contentReference[oaicite:19]{index=19}
+          cosign verify \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --certificate-identity-regexp "https://github.com/${{ github.repository }}/.+" \
+            ${{ env.IMAGE }}:sha-${{ github.sha }}

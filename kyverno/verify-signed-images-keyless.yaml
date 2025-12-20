@@ -1,0 +1,22 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: verify-signed-images
+spec:
+  validationFailureAction: Enforce
+  background: false
+  rules:
+    - name: require-sigstore-signature
+      match:
+        any:
+        - resources:
+            kinds: ["Pod"]
+      verifyImages:
+      - imageReferences:
+        - "ghcr.io/YOUR_GITHUB/*"
+        attestors:
+        - entries:
+          - keyless:
+              # lock to GitHub Actions OIDC
+              issuer: "https://token.actions.githubusercontent.com"
+              subjectRegExp: "https://github.com/YOUR_GITHUB/trustchain-playground/.+"

@@ -6,9 +6,10 @@ on:
   pull_request:
 
 permissions:
-  contents: read
-  packages: write
-  id-token: write   # needed for cosign keyless
+   contents: read
+   packages: write
+   id-token: write
+   pull-requests: read  # needed for cosign keyless
 
 env:
   IMAGE: ghcr.io/${{ github.repository }}/trustchain-playground
@@ -23,6 +24,8 @@ jobs:
       # ---- Secrets scanning (gitleaks) ----
       - name: Gitleaks scan
         uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           args: detect --source . --verbose
 
